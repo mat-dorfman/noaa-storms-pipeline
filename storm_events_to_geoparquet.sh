@@ -250,7 +250,8 @@ FILTERED_COUNT=$(echo "$FILTERED_FILES" | wc -l)
 echo -e "${SUCCESS} Selected $FILTERED_COUNT file(s) to process"
 
 # Warn about duplicates
-DUPLICATE_YEARS=$(echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | sort | uniq -c | awk '$1 > 1 {count++} END {print count}' || echo 0)
+DUPLICATE_YEARS=$(echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | sort | uniq -c | awk '$1 > 1 {count++} END {print count+0}')
+[ -z "$DUPLICATE_YEARS" ] && DUPLICATE_YEARS=0
 
 if [ "$DUPLICATE_YEARS" -gt 0 ]; then
     echo -e "\n${WARNING} Note: Multiple files exist for $DUPLICATE_YEARS year(s)"
@@ -345,6 +346,7 @@ FIRST=true
 APPEND_COUNT=0
 TOTAL_COMBINED=0
 TOTAL_INPUT_ROWS=0
+FEATURE_COUNT=0
 
 while IFS= read -r csv_file; do
     [ -z "$csv_file" ] && continue
@@ -431,6 +433,7 @@ if [ ! -f "$TEMP_GPKG" ]; then
 fi
 
 GPKG_FEATURES=$(ogrinfo -so "$TEMP_GPKG" 2>/dev/null | grep "Feature Count" | grep -oE '[0-9]+' | head -1 || echo "unknown")
+FEATURE_COUNT="$GPKG_FEATURES"
 echo -e "${SUCCESS} Combined $TOTAL_COMBINED CSV file(s)"
 echo -e "${INFO}   Total features: $GPKG_FEATURES"
 
@@ -509,7 +512,7 @@ if [ ! -f "$OUTPUT_FILE" ]; then
 fi
 
 SIZE=$(du -h "$OUTPUT_FILE" | cut -f1)
-FEATURE_COUNT=$(ogrinfo -so "$OUTPUT_FILE" 2>/dev/null | grep "Feature Count" | grep -oE '[0-9]+' | head -1 || echo "unknown")
+# FEATURE_COUNT already set from TEMP_GPKG (reliable even after format conversion)
 
 echo -e "${SUCCESS} Verification complete"
 
