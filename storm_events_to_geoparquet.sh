@@ -432,10 +432,10 @@ if [ ! -f "$TEMP_GPKG" ]; then
     exit 1
 fi
 
-GPKG_FEATURES=$(ogrinfo -so "$TEMP_GPKG" 2>/dev/null | grep "Feature Count" | grep -oE '[0-9]+' | head -1 || echo "unknown")
-FEATURE_COUNT="$GPKG_FEATURES"
+# Use TOTAL_INPUT_ROWS as FEATURE_COUNT (most reliable - we counted each row)
+FEATURE_COUNT="$TOTAL_INPUT_ROWS"
 echo -e "${SUCCESS} Combined $TOTAL_COMBINED CSV file(s)"
-echo -e "${INFO}   Total features: $GPKG_FEATURES"
+echo -e "${INFO}   Total features: $FEATURE_COUNT"
 
 # ============================================================================
 # STEP 9B: Rebuild spatial index for QGIS compatibility
