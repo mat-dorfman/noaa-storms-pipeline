@@ -448,7 +448,8 @@ echo -e "   Input CSV files: $TOTAL_COMBINED"
 echo -e "   Combined features: $FEATURE_COUNT"
 echo -e "   Output file: $OUTPUT_FILE"
 echo -e "   Output size: $SIZE"
-echo -e "   Output format: ${OUTPUT_FORMAT^^}"
+FORMAT_DISPLAY=$(echo "$OUTPUT_FORMAT" | tr '[:lower:]' '[:upper:]')
+echo -e "   Output format: $FORMAT_DISPLAY"
 echo -e "   Geometry type: Point"
 echo -e "   Coordinate system: EPSG:4326 (WGS84)"
 
