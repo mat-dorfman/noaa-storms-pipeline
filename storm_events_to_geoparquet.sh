@@ -60,23 +60,8 @@ set -e          # Stop on first error
 set -o pipefail # Catch failures inside pipelines
 
 # ============================================================================
-# STEP 1: Setup - Colors, paths, and configuration
+# STEP 1: Setup - paths and configuration
 # ============================================================================
-
-# Color codes for terminal output
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-# Icons for visual feedback
-SUCCESS="✅"
-ERROR="❌"
-WARNING="⚠️"
-INFO="ℹ️"
-DOWNLOAD="⬇️"
-PROCESS="⚙️"
 
 # Configuration
 BASE_URL="https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles"
@@ -120,8 +105,8 @@ while [[ $# -gt 0 ]]; do
         -f|--format)
             OUTPUT_FORMAT=$(echo "$2" | tr '[:upper:]' '[:lower:]')
             if [[ "$OUTPUT_FORMAT" != "parquet" && "$OUTPUT_FORMAT" != "gpkg" ]]; then
-                echo -e "${ERROR} Invalid format: $OUTPUT_FORMAT"
-                echo -e "${INFO} Valid formats: parquet, gpkg"
+                echo "Invalid format: $OUTPUT_FORMAT"
+                echo "Valid formats: parquet, gpkg"
                 exit 1
             fi
             shift 2
@@ -131,7 +116,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         *)
-            echo -e "${ERROR} Unknown option: $1"
+            echo "Unknown option: $1"
             show_help
             exit 1
             ;;
@@ -157,7 +142,7 @@ mkdir -p "$DATA_DIR" "$OUTPUT_DIR" "$TEMP_DIR"
 # STEP 4: Display header
 # ============================================================================
 
-echo -e "${BLUE}"
+echo ""
 echo "╔════════════════════════════════════════════════════════════╗"
 
 if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
@@ -168,48 +153,49 @@ fi
 
 echo "║  (Using ogr2ogr append)                                    ║"
 echo "╚════════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
+echo ""
 
 # Show filtering options
 if [ -n "$SINGLE_YEAR" ]; then
-    echo -e "${INFO} Filtering: Year $SINGLE_YEAR only"
+    echo "Filtering: Year $SINGLE_YEAR only"
 elif [ -n "$YEAR_START" ] && [ -n "$YEAR_END" ]; then
-    echo -e "${INFO} Filtering: Years $YEAR_START to $YEAR_END"
+    echo "Filtering: Years $YEAR_START to $YEAR_END"
 else
-    echo -e "${INFO} Filtering: All available years"
+    echo "Filtering: All available years"
 fi
 
-echo -e "${INFO} Output format: $OUTPUT_FORMAT"
+echo "Output format: $OUTPUT_FORMAT"
 echo ""
 
 # ============================================================================
 # STEP 5: Fetch list of available files from NOAA server
 # ============================================================================
 
-echo -e "${PROCESS} Step 1/6: Fetching file list from NOAA..."
+echo "Step 1/6: Fetching file list from NOAA..."
 
 LISTING=$(curl -sfL "$BASE_URL/" 2>/dev/null) || {
-    echo -e "${ERROR} Could not reach NOAA server at $BASE_URL"
-    echo -e "${INFO} Check your internet connection or try:"
-    echo -e "${INFO} curl -I $BASE_URL/"
+    echo "Could not reach NOAA server at $BASE_URL"
+    echo "Check your internet connection or try:"
+    echo "curl -I $BASE_URL/"
     exit 1
 }
 
 FILES=$(echo "$LISTING" | sed -nE 's/.*href="([^"]*StormEvents_details-ftp_v1[^"]*\.csv\.gz)".*/\1/p' | sort -u)
 
 if [ -z "$FILES" ]; then
-    echo -e "${ERROR} No matching files found at $BASE_URL"
+    echo "No matching files found at $BASE_URL"
     exit 1
 fi
 
 FILE_COUNT=$(echo "$FILES" | wc -l)
-echo -e "${SUCCESS} Found $FILE_COUNT file(s) available"
+echo "Found $FILE_COUNT file(s) available"
 
 # ============================================================================
 # STEP 6: Filter files by year and detect duplicates
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 2/6: Filtering by year and checking for duplicates..."
+echo ""
+echo "Step 2/6: Filtering by year and checking for duplicates..."
 
 FILTERED_FILES=""
 YEAR_FILE_PAIRS=""
@@ -218,146 +204,157 @@ for file in $FILES; do
     YEAR=$(echo "$file" | sed -nE 's/.*_d([0-9]{4})_.*/\1/p')
     
     if [ -z "$YEAR" ]; then
-        echo -e "${WARNING} Could not extract year from: $file"
-        continue
+        YEAR="unknown"
     fi
     
-    # Apply year filter
+    # Check if year matches filter
     if [ -n "$SINGLE_YEAR" ]; then
-        [ "$YEAR" != "$SINGLE_YEAR" ] && continue
+        if [ "$YEAR" != "$SINGLE_YEAR" ]; then
+            continue
+        fi
     elif [ -n "$YEAR_START" ] && [ -n "$YEAR_END" ]; then
         if [ "$YEAR" -lt "$YEAR_START" ] || [ "$YEAR" -gt "$YEAR_END" ]; then
             continue
         fi
     fi
     
-    YEAR_FILE_PAIRS="$YEAR_FILE_PAIRS
-$YEAR:$file"
-    
-    FILTERED_FILES="$FILTERED_FILES
-$file"
+    YEAR_FILE_PAIRS="$YEAR_FILE_PAIRS$YEAR|$file
+"
 done
 
-FILTERED_FILES=$(echo "$FILTERED_FILES" | grep -v '^$' || true)
-YEAR_FILE_PAIRS=$(echo "$YEAR_FILE_PAIRS" | grep -v '^$' || true)
+# Sort and detect/flag duplicates (same year, multiple files)
+DUPLICATE_YEARS=$(echo "$YEAR_FILE_PAIRS" | cut -d'|' -f1 | sort | uniq -d)
 
-if [ -z "$FILTERED_FILES" ]; then
-    echo -e "${ERROR} No files match your year filter"
+if [ -n "$DUPLICATE_YEARS" ]; then
+    echo ""
+    echo "Multiple files for same year detected:"
+    for dup_year in $DUPLICATE_YEARS; do
+        echo "   Year $dup_year:"
+        echo "$YEAR_FILE_PAIRS" | grep "^$dup_year|" | cut -d'|' -f2 | sed 's/^/      - /'
+    done
+    echo ""
+    echo "Using most recent version for each year..."
+    echo ""
+fi
+
+# Filter to unique latest version per year
+FILTERED_FILES=$(echo "$YEAR_FILE_PAIRS" | sort -t'|' -k2 -r | awk -F'|' '!seen[$1]++' | cut -d'|' -f2 | sort -u)
+
+FILTERED_FILE_COUNT=$(echo "$FILTERED_FILES" | grep -c . || echo 0)
+echo "After filtering: $FILTERED_FILE_COUNT file(s) to process"
+
+if [ "$FILTERED_FILE_COUNT" -eq 0 ]; then
+    echo "No files match your filter criteria"
     exit 1
 fi
 
-FILTERED_COUNT=$(echo "$FILTERED_FILES" | wc -l)
-echo -e "${SUCCESS} Selected $FILTERED_COUNT file(s) to process"
-
-# Warn about duplicates
-DUPLICATE_YEARS=$(echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | sort | uniq -c | awk '$1 > 1 {count++} END {print count+0}')
-[ -z "$DUPLICATE_YEARS" ] && DUPLICATE_YEARS=0
-
-if [ "$DUPLICATE_YEARS" -gt 0 ]; then
-    echo -e "\n${WARNING} Note: Multiple files exist for $DUPLICATE_YEARS year(s)"
-    echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | sort | uniq -c | awk '$1 > 1' | while read count year; do
-        echo -e "${WARNING} Year $year has $count version(s)"
-    done
-fi
-
 # ============================================================================
-# STEP 7: Download files
+# STEP 7: Download and extract CSV files
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 3/6: Downloading files..."
+echo ""
+echo "Step 3/6: Downloading and extracting files..."
+echo ""
 
-DOWNLOAD_COUNT=0
-
-for file in $FILTERED_FILES; do
-    FILEPATH="$DATA_DIR/$file"
-    
-    if [ -f "$FILEPATH" ]; then
-        echo -e "${INFO} Already downloaded: $file"
-    else
-        echo -e "${DOWNLOAD} Downloading: $file"
-        if curl -L --progress-bar -o "$FILEPATH" "$BASE_URL/$file" 2>/dev/null; then
-            SIZE=$(wc -c < "$FILEPATH" | tr -d ' ')
-            if [ "$SIZE" -lt 10000 ]; then
-                echo -e "${ERROR} Download may have failed (only $SIZE bytes)"
-                rm "$FILEPATH"
-                continue
-            fi
-            echo -e "${SUCCESS} Downloaded ($SIZE bytes)"
-            ((DOWNLOAD_COUNT++))
-        else
-            echo -e "${ERROR} Download failed"
-            continue
-        fi
-    fi
-done
-
-if [ $DOWNLOAD_COUNT -eq 0 ]; then
-    echo -e "${WARNING} No new files downloaded (may already exist)"
-fi
-
-# ============================================================================
-# STEP 8: Extract CSV files
-# ============================================================================
-
-echo -e "\n${PROCESS} Step 4/6: Extracting CSV files..."
-
+TOTAL_DOWNLOADED=0
 CSV_FILES=""
-EXTRACTED_COUNT=0
 
 for file in $FILTERED_FILES; do
-    CSV_FILE="${file%.gz}"
-    FILEPATH="$DATA_DIR/$file"
-    CSV_PATH="$DATA_DIR/$CSV_FILE"
+    echo "Downloading: $file"
+    URL="$BASE_URL/$file"
+    OUTPUT_FILE_PATH="$DATA_DIR/$file"
+    CSV_FILE_PATH="${OUTPUT_FILE_PATH%.gz}"
     
-    if [ ! -f "$CSV_PATH" ]; then
-        echo -e "${PROCESS} Extracting: $CSV_FILE"
-        if gunzip -c "$FILEPATH" > "$CSV_PATH"; then
-            echo -e "${SUCCESS} Extracted"
-            CSV_FILES="$CSV_FILES
-$CSV_PATH"
-            ((EXTRACTED_COUNT++))
+    # Download if not already present
+    if [ ! -f "$CSV_FILE_PATH" ]; then
+        mkdir -p "$DATA_DIR"
+        if curl -fL "$URL" -o "$OUTPUT_FILE_PATH" 2>/dev/null; then
+            echo "   Extracting: $(basename "$CSV_FILE_PATH")"
+            if gunzip -f "$OUTPUT_FILE_PATH"; then
+                echo "   Success"
+                CSV_FILES="$CSV_FILES$CSV_FILE_PATH
+"
+                ((TOTAL_DOWNLOADED++))
+            else
+                echo "   Error extracting $OUTPUT_FILE_PATH"
+                rm -f "$OUTPUT_FILE_PATH" "$CSV_FILE_PATH"
+            fi
         else
-            echo -e "${ERROR} Failed to extract $CSV_FILE"
+            echo "   Error downloading $URL"
+            rm -f "$OUTPUT_FILE_PATH"
         fi
     else
-        echo -e "${INFO} Already extracted: $CSV_FILE"
-        CSV_FILES="$CSV_FILES
-$CSV_PATH"
+        echo "   Already extracted: $(basename "$CSV_FILE_PATH")"
+        CSV_FILES="$CSV_FILES$CSV_FILE_PATH
+"
+        ((TOTAL_DOWNLOADED++))
     fi
 done
-
-CSV_FILES=$(echo "$CSV_FILES" | grep -v '^$' || true)
 
 if [ -z "$CSV_FILES" ]; then
-    echo -e "${ERROR} No CSV files available"
+    echo ""
+    echo "No CSV files available for processing"
     exit 1
 fi
 
-echo -e "${SUCCESS} Extracted $EXTRACTED_COUNT file(s)"
+echo ""
+echo "Downloaded and extracted $TOTAL_DOWNLOADED file(s)"
 
 # ============================================================================
-# STEP 9: Combine CSV files using ogr2ogr append to GeoPackage
+# STEP 8: Count total rows across all CSVs
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 5/6: Combining CSV files using ogr2ogr append..."
+echo ""
+echo "Step 4/6: Analyzing CSV files..."
 
-TEMP_GPKG="$TEMP_DIR/combined.gpkg"
-FIRST=true
-APPEND_COUNT=0
-TOTAL_COMBINED=0
 TOTAL_INPUT_ROWS=0
-FEATURE_COUNT=0
 
 while IFS= read -r csv_file; do
     [ -z "$csv_file" ] && continue
     
+    if [ -f "$csv_file" ]; then
+        # Count rows: total lines minus 1 for header
+        CSV_ROWS=$(wc -l < "$csv_file")
+        if [ "$CSV_ROWS" -gt 1 ]; then
+            CSV_ROWS=$((CSV_ROWS - 1))
+        fi
+        TOTAL_INPUT_ROWS=$((TOTAL_INPUT_ROWS + CSV_ROWS))
+        echo "   $(basename "$csv_file"): $CSV_ROWS rows"
+    fi
+done <<EOF
+$CSV_FILES
+EOF
+
+echo ""
+echo "Total rows to process: $TOTAL_INPUT_ROWS"
+
+# ============================================================================
+# STEP 9: Create GeoPackage with ogr2ogr append
+# ============================================================================
+
+echo ""
+echo "Step 5/6: Creating combined GeoPackage..."
+
+TEMP_GPKG="$TEMP_DIR/combined.gpkg"
+rm -f "$TEMP_GPKG"
+
+FIRST=true
+TOTAL_COMBINED=0
+APPEND_COUNT=0
+
+while IFS= read -r csv_file; do
+    [ -z "$csv_file" ] && continue
+    [ ! -f "$csv_file" ] && continue
+    
     filename=$(basename "$csv_file")
-    CSV_ROWS=$(($(wc -l < "$csv_file") - 1))  # Subtract 1 for header
-    TOTAL_INPUT_ROWS=$((TOTAL_INPUT_ROWS + CSV_ROWS))
+    CSV_ROWS=$(wc -l < "$csv_file")
+    if [ "$CSV_ROWS" -gt 1 ]; then
+        CSV_ROWS=$((CSV_ROWS - 1))
+    fi
     
     if [ "$FIRST" = true ]; then
-        echo -e "${PROCESS} Initializing GeoPackage with: $filename"
-        echo -e "   Input rows: $CSV_ROWS"
+        echo "Initializing GeoPackage with: $filename"
+        echo "   Input rows: $CSV_ROWS"
         
         # Create modified CSV with source_csv filename column added
         # Use awk to add filename to every row (header + data rows)
@@ -380,18 +377,18 @@ while IFS= read -r csv_file; do
             "$TEMP_GPKG" \
             "$CSV_WITH_FILENAME" 2>/dev/null; then
             
-            echo -e "${SUCCESS} Initialized GeoPackage with spatial index and filename attribute"
+            echo "Initialized GeoPackage with spatial index and filename attribute"
             rm "$CSV_WITH_FILENAME"  # Clean up modified CSV
             FIRST=false
             ((TOTAL_COMBINED++))
         else
-            echo -e "${ERROR} Failed to initialize GeoPackage with $filename"
+            echo "Failed to initialize GeoPackage with $filename"
             rm "$CSV_WITH_FILENAME"  # Clean up on failure
             exit 1
         fi
     else
-        echo -e "${PROCESS} Appending: $filename"
-        echo -e "   Input rows: $CSV_ROWS"
+        echo "Appending: $filename"
+        echo "   Input rows: $CSV_ROWS"
         
         # Create modified CSV with source_csv filename column added
         # CRITICAL FIX: Include header for proper column mapping in append
@@ -414,12 +411,12 @@ while IFS= read -r csv_file; do
             "$TEMP_GPKG" \
             "$CSV_WITH_FILENAME" 2>/dev/null; then
             
-            echo -e "${SUCCESS} Appended with filename attribute"
+            echo "Appended with filename attribute"
             rm "$CSV_WITH_FILENAME"  # Clean up modified CSV
             ((APPEND_COUNT++))
             ((TOTAL_COMBINED++))
         else
-            echo -e "${WARNING} Failed to append $filename (will skip)"
+            echo "Failed to append $filename (will skip)"
             rm "$CSV_WITH_FILENAME"  # Clean up on failure
         fi
     fi
@@ -428,20 +425,21 @@ $CSV_FILES
 EOF
 
 if [ ! -f "$TEMP_GPKG" ]; then
-    echo -e "${ERROR} Failed to create combined GeoPackage"
+    echo "Failed to create combined GeoPackage"
     exit 1
 fi
 
 # Use TOTAL_INPUT_ROWS as FEATURE_COUNT (most reliable - we counted each row)
 FEATURE_COUNT="$TOTAL_INPUT_ROWS"
-echo -e "${SUCCESS} Combined $TOTAL_COMBINED CSV file(s)"
-echo -e "${INFO}   Total features: $FEATURE_COUNT"
+echo "Combined $TOTAL_COMBINED CSV file(s)"
+echo "   Total features: $FEATURE_COUNT"
 
 # ============================================================================
 # STEP 9B: Rebuild spatial index for QGIS compatibility
 # ============================================================================
 
-echo -e "\n${PROCESS} Rebuilding spatial index for QGIS..."
+echo ""
+echo "Rebuilding spatial index for QGIS..."
 
 # Use ogrinfo to verify spatial index exists, rebuild if needed
 if ogrinfo -so "$TEMP_GPKG" "combined" 2>/dev/null | grep -q "Geometry:"; then
@@ -458,12 +456,12 @@ if ogrinfo -so "$TEMP_GPKG" "combined" 2>/dev/null | grep -q "Geometry:"; then
         
         # Replace original with indexed version
         mv "$TEMP_GPKG_REBUILT" "$TEMP_GPKG"
-        echo -e "${SUCCESS} Spatial index rebuilt and optimized"
+        echo "Spatial index rebuilt and optimized"
     else
-        echo -e "${WARNING} Could not rebuild spatial index (will continue)"
+        echo "Could not rebuild spatial index (will continue)"
     fi
 else
-    echo -e "${WARNING} Could not verify geometry in GeoPackage (will continue)"
+    echo "Could not verify geometry in GeoPackage (will continue)"
 fi
 
 # ============================================================================
@@ -471,21 +469,23 @@ fi
 # ============================================================================
 
 if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
-    echo -e "\n${PROCESS} Step 6/6: Using GeoPackage as final output..."
+    echo ""
+    echo "Step 6/6: Using GeoPackage as final output..."
     
     # Copy GeoPackage to output location
     if cp "$TEMP_GPKG" "$OUTPUT_FILE"; then
-        echo -e "${SUCCESS} GeoPackage ready: $OUTPUT_FILE"
+        echo "GeoPackage ready: $OUTPUT_FILE"
     else
-        echo -e "${ERROR} Failed to copy GeoPackage to output location"
+        echo "Failed to copy GeoPackage to output location"
         exit 1
     fi
 else
-    echo -e "\n${PROCESS} Step 6/6: Converting to spatial GeoParquet..."
+    echo ""
+    echo "Step 6/6: Converting to spatial GeoParquet..."
     
-    echo -e "${PROCESS} Creating Point geometry from BEGIN_LON/BEGIN_LAT..."
-    echo -e "${PROCESS} Setting coordinate system to EPSG:4326 (WGS84)..."
-    echo -e "${PROCESS} Preserving spatial extent for QGIS..."
+    echo "Creating Point geometry from BEGIN_LON/BEGIN_LAT..."
+    echo "Setting coordinate system to EPSG:4326 (WGS84)..."
+    echo "Preserving spatial extent for QGIS..."
     
     if ogr2ogr -f Parquet \
         -a_srs EPSG:4326 \
@@ -493,9 +493,9 @@ else
         "$TEMP_GPKG" \
         "combined" 2>/dev/null; then
         
-        echo -e "${SUCCESS} Converted to spatial GeoParquet with spatial extent"
+        echo "Converted to spatial GeoParquet with spatial extent"
     else
-        echo -e "${ERROR} Failed to convert to GeoParquet"
+        echo "Failed to convert to GeoParquet"
         exit 1
     fi
 fi
@@ -504,74 +504,80 @@ fi
 # STEP 11: Verify output
 # ============================================================================
 
-echo -e "\n${PROCESS} Verifying output..."
+echo ""
+echo "Verifying output..."
 
 if [ ! -f "$OUTPUT_FILE" ]; then
-    echo -e "${ERROR} Output file not found: $OUTPUT_FILE"
+    echo "Output file not found: $OUTPUT_FILE"
     exit 1
 fi
 
 SIZE=$(du -h "$OUTPUT_FILE" | cut -f1)
 # FEATURE_COUNT already set from TEMP_GPKG (reliable even after format conversion)
 
-echo -e "${SUCCESS} Verification complete"
+echo "Verification complete"
 
 # ============================================================================
 # Summary
 # ============================================================================
 
-echo -e "\n${GREEN}╔════════════════════════════════════════════════════════════╗"
-echo "║  ✅ Conversion Complete!                                     ║"
-echo "╚════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  Conversion Complete!                                      ║"
+echo "╚════════════════════════════════════════════════════════════╝"
 
-echo -e "\n${INFO} Processing Summary:"
-echo -e "   Input CSV files: $TOTAL_COMBINED"
-echo -e "   Total rows downloaded: $TOTAL_INPUT_ROWS"
-echo -e "   Rows exported: $FEATURE_COUNT"
+echo ""
+echo "Processing Summary:"
+echo "   Input CSV files: $TOTAL_COMBINED"
+echo "   Total rows downloaded: $TOTAL_INPUT_ROWS"
+echo "   Rows exported: $FEATURE_COUNT"
 if [ "$FEATURE_COUNT" = "$TOTAL_INPUT_ROWS" ]; then
-    echo -e "   Data integrity: ${GREEN}✅ All rows exported successfully${NC}"
+    echo "   Data integrity: All rows exported successfully"
 else
-    echo -e "   Data integrity: ${WARNING}⚠️  Row count mismatch (downloaded: $TOTAL_INPUT_ROWS, exported: $FEATURE_COUNT)${NC}"
+    echo "   Data integrity: Row count mismatch (downloaded: $TOTAL_INPUT_ROWS, exported: $FEATURE_COUNT)"
 fi
-echo -e "   Output file: $OUTPUT_FILE"
-echo -e "   Output size: $SIZE"
+echo "   Output file: $OUTPUT_FILE"
+echo "   Output size: $SIZE"
 FORMAT_DISPLAY=$(echo "$OUTPUT_FORMAT" | tr '[:lower:]' '[:upper:]')
-echo -e "   Output format: $FORMAT_DISPLAY"
-echo -e "   Geometry type: Point"
-echo -e "   Coordinate system: EPSG:4326 (WGS84)"
-echo -e "   Filename attribute: ✅ source_csv (on every feature)"
+echo "   Output format: $FORMAT_DISPLAY"
+echo "   Geometry type: Point"
+echo "   Coordinate system: EPSG:4326 (WGS84)"
+echo "   Filename attribute: source_csv (on every feature)"
 
-echo -e "\n${INFO} Next steps to open in QGIS:"
-echo -e "   1. Open QGIS 3.0+"
-echo -e "   2. Layer → Add Layer → Add Vector Layer"
-echo -e "   3. Select: $OUTPUT_FILE"
-echo -e "   4. Storm events will display as points on the map"
+echo ""
+echo "Next steps to open in QGIS:"
+echo "   1. Open QGIS 3.0+"
+echo "   2. Layer → Add Layer → Add Vector Layer"
+echo "   3. Select: $OUTPUT_FILE"
+echo "   4. Storm events will display as points on the map"
 
 if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
-    echo -e "\n${INFO} File is ready for:"
-    echo -e "   • QGIS analysis and visualization"
-    echo -e "   • ArcGIS Pro"
-    echo -e "   • PostGIS database import"
-    echo -e "   • SpatiaLite queries"
-    echo -e "   • Any GIS software supporting GeoPackage"
+    echo ""
+    echo "File is ready for:"
+    echo "   • QGIS analysis and visualization"
+    echo "   • ArcGIS Pro"
+    echo "   • PostGIS database import"
+    echo "   • SpatiaLite queries"
+    echo "   • Any GIS software supporting GeoPackage"
 else
-    echo -e "\n${INFO} File is ready for:"
-    echo -e "   • QGIS analysis and visualization"
-    echo -e "   • ArcGIS Pro"
-    echo -e "   • PostGIS database import"
-    echo -e "   • Any GIS software supporting GeoParquet"
+    echo ""
+    echo "File is ready for:"
+    echo "   • QGIS analysis and visualization"
+    echo "   • ArcGIS Pro"
+    echo "   • PostGIS database import"
+    echo "   • Any GIS software supporting GeoParquet"
 fi
 
 # ============================================================================
 # STEP 12: Cleanup
 # ============================================================================
 
-read -p "$(echo -e ${BLUE})Clean up temporary files? (y/n)${NC} " -n 1 -r
+read -p "Clean up temporary files? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo -e "${PROCESS} Cleaning up..."
+    echo "Cleaning up..."
     rm -rf "$TEMP_DIR"
-    echo -e "${SUCCESS} Cleanup complete"
+    echo "Cleanup complete"
 fi
 
 exit 0
