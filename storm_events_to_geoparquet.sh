@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 
 ################################################################################
-# Download NOAA Storm Events and Convert to GeoParquet
+# Combine CSV Files → Spatial GeoParquet using ogr2ogr append
 #
-# Simple command-line script to download storm event CSV files and combine
-# them into a single GeoParquet file for use in QGIS.
+# Takes downloaded/extracted NOAA Storm Events CSV files and combines them
+# into a single spatial GeoParquet file using ogr2ogr append.
+#
+# Workflow:
+#   1. Download .csv.gz files from NOAA (optional)
+#   2. Extract .csv.gz to .csv
+#   3. Use ogr2ogr to append all CSVs to intermediate GeoPackage
+#   4. Convert final GeoPackage to spatial GeoParquet
 #
 # Usage:
-#   ./storm_events_to_geoparquet.sh                    # Download all years
-#   ./storm_events_to_geoparquet.sh 2022               # Download single year
-#   ./storm_events_to_geoparquet.sh 2020 2023          # Download year range
+#   ./storm_events_csv_to_geoparquet.sh                    # Download all years
+#   ./storm_events_csv_to_geoparquet.sh -y 2022            # Download single year
+#   ./storm_events_csv_to_geoparquet.sh -s 2022 -e 2026    # Year range
+#   ./storm_events_csv_to_geoparquet.sh -o output.parquet  # Custom output
 #
 # Options:
 #   -h, --help       Show this help message
@@ -19,9 +26,15 @@
 #   -o, --output FILE Output filename (default: storm_events_combined.parquet)
 #
 # Examples:
-#   ./storm_events_to_geoparquet.sh                    # All years
-#   ./storm_events_to_geoparquet.sh -y 2022            # Year 2022 only
-#   ./storm_events_to_geoparquet.sh -s 2020 -e 2023    # Years 2020-2023
+#   ./storm_events_csv_to_geoparquet.sh                          # All years
+#   ./storm_events_csv_to_geoparquet.sh -y 2022                  # Year 2022 only
+#   ./storm_events_csv_to_geoparquet.sh -s 2020 -e 2023          # Years 2020-2023
+#   ./storm_events_csv_to_geoparquet.sh -o storms_2022_26.parquet # Custom output
+#
+# Requirements:
+#   - ogr2ogr (from GDAL)
+#   - curl (for downloading files)
+#   - gunzip (for extracting files)
 #
 ################################################################################
 
@@ -64,7 +77,7 @@ SINGLE_YEAR=""
 # ============================================================================
 
 show_help() {
-    grep "^#" "$0" | head -30
+    grep "^#" "$0" | head -50
 }
 
 while [[ $# -gt 0 ]]; do
@@ -109,7 +122,8 @@ mkdir -p "$DATA_DIR" "$OUTPUT_DIR" "$TEMP_DIR"
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║  NOAA Storm Events → GeoParquet Converter                   ║"
+echo "║  NOAA Storm Events CSV → Spatial GeoParquet                ║"
+echo "║  (Using ogr2ogr append)                                    ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -128,9 +142,8 @@ echo ""
 # STEP 5: Fetch list of available files from NOAA server
 # ============================================================================
 
-echo -e "${PROCESS} Step 1/5: Fetching file list from NOAA..."
+echo -e "${PROCESS} Step 1/6: Fetching file list from NOAA..."
 
-# Use -L to follow redirects (some servers may redirect)
 LISTING=$(curl -sfL "$BASE_URL/" 2>/dev/null) || {
     echo -e "${ERROR} Could not reach NOAA server at $BASE_URL"
     echo -e "${INFO} Check your internet connection or try:"
@@ -138,14 +151,10 @@ LISTING=$(curl -sfL "$BASE_URL/" 2>/dev/null) || {
     exit 1
 }
 
-# Use sed instead of grep for better cross-platform compatibility
-# This extracts filenames matching: StormEvents_details-ftp_v1.0_d####_c########.csv.gz
 FILES=$(echo "$LISTING" | sed -nE 's/.*href="([^"]*StormEvents_details-ftp_v1[^"]*\.csv\.gz)".*/\1/p' | sort -u)
 
 if [ -z "$FILES" ]; then
     echo -e "${ERROR} No matching files found at $BASE_URL"
-    echo -e "${INFO} The page format may have changed - check manually:"
-    echo -e "${INFO} curl $BASE_URL/ | head -50"
     exit 1
 fi
 
@@ -156,14 +165,12 @@ echo -e "${SUCCESS} Found $FILE_COUNT file(s) available"
 # STEP 6: Filter files by year and detect duplicates
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 2/5: Filtering by year and checking for duplicates..."
+echo -e "\n${PROCESS} Step 2/6: Filtering by year and checking for duplicates..."
 
 FILTERED_FILES=""
 YEAR_FILE_PAIRS=""
 
 for file in $FILES; do
-    # Extract year from filename: StormEvents_details-ftp_v1.0_d{YEAR}_c{DATE}.csv.gz
-    # Look for the pattern d followed by 4 digits
     YEAR=$(echo "$file" | sed -nE 's/.*_d([0-9]{4})_.*/\1/p')
     
     if [ -z "$YEAR" ]; then
@@ -180,7 +187,6 @@ for file in $FILES; do
         fi
     fi
     
-    # Track year:filename pairs (Bash 3.2 compatible, no associative arrays)
     YEAR_FILE_PAIRS="$YEAR_FILE_PAIRS
 $YEAR:$file"
     
@@ -199,43 +205,21 @@ fi
 FILTERED_COUNT=$(echo "$FILTERED_FILES" | wc -l)
 echo -e "${SUCCESS} Selected $FILTERED_COUNT file(s) to process"
 
-# Warn about duplicates (check each year for multiple files)
-DUPLICATE_YEARS=0
-PROCESSED_YEARS=""
-
-echo "$YEAR_FILE_PAIRS" | while IFS=: read year file; do
-    # Check if we've already processed this year
-    if echo "$PROCESSED_YEARS" | grep -q "^$year$"; then
-        # Already counted, skip
-        continue
-    fi
-    
-    # Count how many files exist for this year
-    FILE_COUNT_FOR_YEAR=$(echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | grep -c "^$year$")
-    
-    if [ "$FILE_COUNT_FOR_YEAR" -gt 1 ]; then
-        echo -e "\n${WARNING} Multiple versions found for year $year:"
-        echo "$YEAR_FILE_PAIRS" | grep "^$year:" | cut -d: -f2 | while read f; do
-            echo "   → $f"
-        done
-        PROCESSED_YEARS="$PROCESSED_YEARS
-$year"
-    fi
-done
-
-# Count total years with duplicates
+# Warn about duplicates
 DUPLICATE_YEARS=$(echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | sort | uniq -c | awk '$1 > 1 {count++} END {print count}' || echo 0)
 
 if [ "$DUPLICATE_YEARS" -gt 0 ]; then
     echo -e "\n${WARNING} Note: Multiple files exist for $DUPLICATE_YEARS year(s)"
-    echo -e "   Each version will be downloaded and processed separately"
+    echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | sort | uniq -c | awk '$1 > 1' | while read count year; do
+        echo -e "${WARNING} Year $year has $count version(s)"
+    done
 fi
 
 # ============================================================================
 # STEP 7: Download files
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 3/5: Downloading files..."
+echo -e "\n${PROCESS} Step 3/6: Downloading files..."
 
 DOWNLOAD_COUNT=0
 
@@ -247,7 +231,6 @@ for file in $FILTERED_FILES; do
     else
         echo -e "${DOWNLOAD} Downloading: $file"
         if curl -L --progress-bar -o "$FILEPATH" "$BASE_URL/$file" 2>/dev/null; then
-            # Verify file size
             SIZE=$(wc -c < "$FILEPATH" | tr -d ' ')
             if [ "$SIZE" -lt 10000 ]; then
                 echo -e "${ERROR} Download may have failed (only $SIZE bytes)"
@@ -268,91 +251,137 @@ if [ $DOWNLOAD_COUNT -eq 0 ]; then
 fi
 
 # ============================================================================
-# STEP 8: Convert CSV files to GeoParquet
+# STEP 8: Extract CSV files
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 4/5: Converting to GeoParquet..."
+echo -e "\n${PROCESS} Step 4/6: Extracting CSV files..."
 
-CONVERTED_COUNT=0
-PARQUET_FILES=""
+CSV_FILES=""
+EXTRACTED_COUNT=0
 
 for file in $FILTERED_FILES; do
     CSV_FILE="${file%.gz}"
     FILEPATH="$DATA_DIR/$file"
     CSV_PATH="$DATA_DIR/$CSV_FILE"
     
-    # Extract if needed
     if [ ! -f "$CSV_PATH" ]; then
         echo -e "${PROCESS} Extracting: $CSV_FILE"
-        gunzip -c "$FILEPATH" > "$CSV_PATH"
-    fi
-    
-    # Convert to Parquet
-    PARQUET_FILE="$TEMP_DIR/${CSV_FILE%.csv}.parquet"
-    
-    echo -e "${PROCESS} Converting: $CSV_FILE"
-    
-#changed possible names to BEGIN_LON and BEGIN_LAT to match the actual column names in the CSV files
-
-    if ogr2ogr -f Parquet \
-        -oo X_POSSIBLE_NAMES=BEGIN_LON \
-        -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
-        -a_srs EPSG:4326 \
-        "$PARQUET_FILE" \
-        "$CSV_PATH" 2>/dev/null; then
-        
-        echo -e "${SUCCESS} Converted"
-        PARQUET_FILES="$PARQUET_FILES
-$PARQUET_FILE"
-        ((CONVERTED_COUNT++))
+        if gunzip -c "$FILEPATH" > "$CSV_PATH"; then
+            echo -e "${SUCCESS} Extracted"
+            CSV_FILES="$CSV_FILES
+$CSV_PATH"
+            ((EXTRACTED_COUNT++))
+        else
+            echo -e "${ERROR} Failed to extract $CSV_FILE"
+        fi
     else
-        echo -e "${ERROR} Conversion failed"
+        echo -e "${INFO} Already extracted: $CSV_FILE"
+        CSV_FILES="$CSV_FILES
+$CSV_PATH"
     fi
 done
 
-# Clean up empty lines
-PARQUET_FILES=$(echo "$PARQUET_FILES" | grep -v '^$' || true)
+CSV_FILES=$(echo "$CSV_FILES" | grep -v '^$' || true)
 
-if [ -z "$PARQUET_FILES" ]; then
-    echo -e "${ERROR} No files were successfully converted"
+if [ -z "$CSV_FILES" ]; then
+    echo -e "${ERROR} No CSV files available"
     exit 1
 fi
 
-echo -e "${SUCCESS} Converted $CONVERTED_COUNT file(s)"
+echo -e "${SUCCESS} Extracted $EXTRACTED_COUNT file(s)"
 
 # ============================================================================
-# STEP 9: Combine all Parquet files
+# STEP 9: Combine CSV files using ogr2ogr append to GeoPackage
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 5/5: Combining Parquet files..."
+echo -e "\n${PROCESS} Step 5/6: Combining CSV files using ogr2ogr append..."
 
+TEMP_GPKG="$TEMP_DIR/combined.gpkg"
 FIRST=true
-while IFS= read -r pfile; do
-    [ -z "$pfile" ] && continue
+APPEND_COUNT=0
+TOTAL_COMBINED=0
+
+while IFS= read -r csv_file; do
+    [ -z "$csv_file" ] && continue
+    
+    filename=$(basename "$csv_file")
     
     if [ "$FIRST" = true ]; then
-        echo -e "${PROCESS} Initializing combined file with: $(basename $pfile)"
-        if ogr2ogr -f Parquet "$OUTPUT_FILE" "$pfile" 2>/dev/null; then
+        echo -e "${PROCESS} Initializing GeoPackage with: $filename"
+        
+        # Convert first CSV to GeoPackage with geometry
+        if ogr2ogr -f GPKG \
+            -oo X_POSSIBLE_NAMES=BEGIN_LON \
+            -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
+            -a_srs EPSG:4326 \
+            "$TEMP_GPKG" \
+            "$csv_file" 2>/dev/null; then
+            
+            echo -e "${SUCCESS} Initialized GeoPackage"
             FIRST=false
+            ((TOTAL_COMBINED++))
         else
-            echo -e "${ERROR} Failed to initialize output file"
+            echo -e "${ERROR} Failed to initialize GeoPackage with $filename"
             exit 1
         fi
     else
-        echo -e "${PROCESS} Appending: $(basename $pfile)"
-        if ! ogr2ogr -f Parquet -append "$OUTPUT_FILE" "$pfile" 2>/dev/null; then
-            echo -e "${ERROR} Failed to append $(basename $pfile)"
+        echo -e "${PROCESS} Appending: $filename"
+        
+        # Append remaining CSVs to GeoPackage layer
+        if ogr2ogr -f GPKG \
+            -append \
+            -nln combined \
+            -oo X_POSSIBLE_NAMES=BEGIN_LON \
+            -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
+            "$TEMP_GPKG" \
+            "$csv_file" 2>/dev/null; then
+            
+            echo -e "${SUCCESS} Appended"
+            ((APPEND_COUNT++))
+            ((TOTAL_COMBINED++))
+        else
+            echo -e "${WARNING} Failed to append $filename (will skip)"
         fi
     fi
 done <<EOF
-$PARQUET_FILES
+$CSV_FILES
 EOF
 
+if [ ! -f "$TEMP_GPKG" ]; then
+    echo -e "${ERROR} Failed to create combined GeoPackage"
+    exit 1
+fi
+
+GPKG_FEATURES=$(ogrinfo -so "$TEMP_GPKG" 2>/dev/null | grep "Feature Count" | grep -oE '[0-9]+' | head -1 || echo "unknown")
+echo -e "${SUCCESS} Combined $TOTAL_COMBINED CSV file(s)"
+echo -e "${INFO}   Total features: $GPKG_FEATURES"
+
 # ============================================================================
-# STEP 10: Generate summary and display results
+# STEP 10: Convert combined GeoPackage to final spatial GeoParquet
 # ============================================================================
 
-echo -e "\n${PROCESS} Generating summary..."
+echo -e "\n${PROCESS} Step 6/6: Converting to spatial GeoParquet..."
+
+echo -e "${PROCESS} Creating Point geometry from BEGIN_LON/BEGIN_LAT..."
+echo -e "${PROCESS} Setting coordinate system to EPSG:4326 (WGS84)..."
+
+if ogr2ogr -f Parquet \
+    -a_srs EPSG:4326 \
+    "$OUTPUT_FILE" \
+    "$TEMP_GPKG" \
+    "combined" 2>/dev/null; then
+    
+    echo -e "${SUCCESS} Converted to spatial GeoParquet"
+else
+    echo -e "${ERROR} Failed to convert to GeoParquet"
+    exit 1
+fi
+
+# ============================================================================
+# STEP 11: Verify output
+# ============================================================================
+
+echo -e "\n${PROCESS} Verifying output..."
 
 if [ ! -f "$OUTPUT_FILE" ]; then
     echo -e "${ERROR} Output file not found: $OUTPUT_FILE"
@@ -360,27 +389,40 @@ if [ ! -f "$OUTPUT_FILE" ]; then
 fi
 
 SIZE=$(du -h "$OUTPUT_FILE" | cut -f1)
-FEATURE_COUNT=$(ogrinfo -so "$OUTPUT_FILE" 2>/dev/null | grep "Feature Count" | grep -oE '[0-9]+' | head -1 || true)
+FEATURE_COUNT=$(ogrinfo -so "$OUTPUT_FILE" 2>/dev/null | grep "Feature Count" | grep -oE '[0-9]+' | head -1 || echo "unknown")
 
-echo -e "\n${GREEN}╔════════════════════════════════════════════════════════════╗"
-echo "║  ✅ Success!                                                 ║"
-echo "╚════════════════════════════════════════════════════════════╝${NC}"
-
-echo -e "\n${INFO} Output Summary:"
-echo -e "   File: $OUTPUT_FILE"
-echo -e "   Size: $SIZE"
-if [ -n "$FEATURE_COUNT" ]; then
-    echo -e "   Features: $FEATURE_COUNT events"
-fi
-
-echo -e "\n${INFO} Next steps to open in QGIS:"
-echo -e "   1. Open QGIS"
-echo -e "   2. Layer → Add Layer → Add Vector Layer"
-echo -e "   3. Select: $OUTPUT_FILE"
-echo -e "   4. Events will display as points on the map"
+echo -e "${SUCCESS} Verification complete"
 
 # ============================================================================
-# STEP 11: Offer to clean up temporary files
+# Summary
+# ============================================================================
+
+echo -e "\n${GREEN}╔════════════════════════════════════════════════════════════╗"
+echo "║  ✅ Conversion Complete!                                     ║"
+echo "╚════════════════════════════════════════════════════════════╝${NC}"
+
+echo -e "\n${INFO} Processing Summary:"
+echo -e "   Input CSV files: $TOTAL_COMBINED"
+echo -e "   Combined features: $FEATURE_COUNT"
+echo -e "   Output file: $OUTPUT_FILE"
+echo -e "   Output size: $SIZE"
+echo -e "   Geometry type: Point"
+echo -e "   Coordinate system: EPSG:4326 (WGS84)"
+
+echo -e "\n${INFO} Next steps to open in QGIS:"
+echo -e "   1. Open QGIS 3.0+"
+echo -e "   2. Layer → Add Layer → Add Vector Layer"
+echo -e "   3. Select: $OUTPUT_FILE"
+echo -e "   4. Storm events will display as points on the map"
+
+echo -e "\n${INFO} File is ready for:"
+echo -e "   • QGIS analysis and visualization"
+echo -e "   • ArcGIS Pro"
+echo -e "   • PostGIS database import"
+echo -e "   • Any GIS software supporting GeoParquet"
+
+# ============================================================================
+# STEP 12: Cleanup
 # ============================================================================
 
 read -p "$(echo -e ${BLUE})Clean up temporary files? (y/n)${NC} " -n 1 -r
