@@ -344,14 +344,18 @@ TEMP_GPKG="$TEMP_DIR/combined.gpkg"
 FIRST=true
 APPEND_COUNT=0
 TOTAL_COMBINED=0
+TOTAL_INPUT_ROWS=0
 
 while IFS= read -r csv_file; do
     [ -z "$csv_file" ] && continue
     
     filename=$(basename "$csv_file")
+    CSV_ROWS=$(($(wc -l < "$csv_file") - 1))  # Subtract 1 for header
+    TOTAL_INPUT_ROWS=$((TOTAL_INPUT_ROWS + CSV_ROWS))
     
     if [ "$FIRST" = true ]; then
         echo -e "${PROCESS} Initializing GeoPackage with: $filename"
+        echo -e "   Input rows: $CSV_ROWS"
         
         # Create modified CSV with source_csv filename column added
         # Use awk to add filename to every row (header + data rows)
@@ -385,13 +389,15 @@ while IFS= read -r csv_file; do
         fi
     else
         echo -e "${PROCESS} Appending: $filename"
+        echo -e "   Input rows: $CSV_ROWS"
         
         # Create modified CSV with source_csv filename column added
-        # Use awk to add filename to every row (header + data rows)
+        # CRITICAL FIX: Include header for proper column mapping in append
+        # ogr2ogr will automatically skip duplicate headers during append
         CSV_WITH_FILENAME="$TEMP_DIR/temp_append_${filename%.csv}_src.csv"
         awk -v csv_name="$filename" \
             'BEGIN {FS=","; OFS=","} 
-             NR==1 {next}
+             NR==1 {print $0 ",source_csv"; next}
              {print $0 "," csv_name}' \
             "$csv_file" > "$CSV_WITH_FILENAME"
         
@@ -517,7 +523,13 @@ echo "╚═══════════════════════�
 
 echo -e "\n${INFO} Processing Summary:"
 echo -e "   Input CSV files: $TOTAL_COMBINED"
-echo -e "   Combined features: $FEATURE_COUNT"
+echo -e "   Total rows downloaded: $TOTAL_INPUT_ROWS"
+echo -e "   Rows exported: $FEATURE_COUNT"
+if [ "$FEATURE_COUNT" = "$TOTAL_INPUT_ROWS" ]; then
+    echo -e "   Data integrity: ${GREEN}✅ All rows exported successfully${NC}"
+else
+    echo -e "   Data integrity: ${WARNING}⚠️  Row count mismatch (downloaded: $TOTAL_INPUT_ROWS, exported: $FEATURE_COUNT)${NC}"
+fi
 echo -e "   Output file: $OUTPUT_FILE"
 echo -e "   Output size: $SIZE"
 FORMAT_DISPLAY=$(echo "$OUTPUT_FORMAT" | tr '[:lower:]' '[:upper:]')
