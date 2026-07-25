@@ -25,8 +25,8 @@
 #
 ################################################################################
 
-set -e          # Stop on first error so students see exactly which step failed
-set -o pipefail # Catch failures inside pipelines (e.g. curl failing before grep/sort run), not just the last command
+set -e          # Stop on first error
+set -o pipefail # Catch failures inside pipelines
 
 # ============================================================================
 # STEP 1: Setup - Colors, paths, and configuration
@@ -97,16 +97,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# If positional arguments provided (backward compatibility)
-if [ $# -gt 0 ]; then
-    if [ -z "$SINGLE_YEAR" ] && [ -z "$YEAR_START" ]; then
-        SINGLE_YEAR="$1"
-    fi
-    if [ $# -gt 1 ] && [ -z "$YEAR_END" ]; then
-        YEAR_END="$2"
-    fi
-fi
-
 # ============================================================================
 # STEP 3: Create working directories
 # ============================================================================
@@ -140,17 +130,22 @@ echo ""
 
 echo -e "${PROCESS} Step 1/5: Fetching file list from NOAA..."
 
-if ! LISTING=$(curl -sf "$BASE_URL/"); then
+# Use -L to follow redirects (some servers may redirect)
+LISTING=$(curl -sfL "$BASE_URL/" 2>/dev/null) || {
     echo -e "${ERROR} Could not reach NOAA server at $BASE_URL"
+    echo -e "${INFO} Check your internet connection or try:"
+    echo -e "${INFO} curl -I $BASE_URL/"
     exit 1
-fi
+}
 
-# Note: -E (not -P) so this works with macOS's built-in BSD grep, which has no PCRE support
-FILES=$(echo "$LISTING" | grep -oE 'StormEvents_details-ftp_v1\.0_d[0-9]{4}_c[0-9]{8}\.csv\.gz' | sort -u)
+# Use sed instead of grep for better cross-platform compatibility
+# This extracts filenames matching: StormEvents_details-ftp_v1.0_d####_c########.csv.gz
+FILES=$(echo "$LISTING" | sed -nE 's/.*href="([^"]*StormEvents_details-ftp_v1[^"]*\.csv\.gz)".*/\1/p' | sort -u)
 
 if [ -z "$FILES" ]; then
-    echo -e "${ERROR} NOAA server reachable, but no matching files found in listing at $BASE_URL"
-    echo -e "${INFO} The page format may have changed - check $BASE_URL manually"
+    echo -e "${ERROR} No matching files found at $BASE_URL"
+    echo -e "${INFO} The page format may have changed - check manually:"
+    echo -e "${INFO} curl $BASE_URL/ | head -50"
     exit 1
 fi
 
@@ -168,7 +163,13 @@ declare -A YEAR_FILES
 
 for file in $FILES; do
     # Extract year from filename: StormEvents_details-ftp_v1.0_d{YEAR}_c{DATE}.csv.gz
-    YEAR=$(echo "$file" | grep -oE 'd[0-9]{4}' | head -1 | cut -c2-5)
+    # Look for the pattern d followed by 4 digits
+    YEAR=$(echo "$file" | sed -nE 's/.*_d([0-9]{4})_.*/\1/p')
+    
+    if [ -z "$YEAR" ]; then
+        echo -e "${WARNING} Could not extract year from: $file"
+        continue
+    fi
     
     # Apply year filter
     if [ -n "$SINGLE_YEAR" ]; then
@@ -366,8 +367,6 @@ echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo -e "${PROCESS} Cleaning up..."
     rm -rf "$TEMP_DIR"
-    # Optional: remove CSV files to save space
-    # rm -f "$DATA_DIR"/*.csv
     echo -e "${SUCCESS} Cleanup complete"
 fi
 
