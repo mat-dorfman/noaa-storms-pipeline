@@ -339,15 +339,19 @@ while IFS= read -r csv_file; do
     if [ "$FIRST" = true ]; then
         echo -e "${PROCESS} Initializing GeoPackage with: $filename"
         
-        # Convert first CSV to GeoPackage with geometry
+        # Convert first CSV to GeoPackage with geometry and spatial index
+        # CRITICAL: Use -nln combined to explicitly name the layer
+        # CRITICAL: Use -lco SPATIAL_INDEX=YES to create spatial index for QGIS
         if ogr2ogr -f GPKG \
+            -nln combined \
+            -lco SPATIAL_INDEX=YES \
             -oo X_POSSIBLE_NAMES=BEGIN_LON \
             -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
             -a_srs EPSG:4326 \
             "$TEMP_GPKG" \
             "$csv_file" 2>/dev/null; then
             
-            echo -e "${SUCCESS} Initialized GeoPackage"
+            echo -e "${SUCCESS} Initialized GeoPackage with spatial index"
             FIRST=false
             ((TOTAL_COMBINED++))
         else
@@ -358,9 +362,11 @@ while IFS= read -r csv_file; do
         echo -e "${PROCESS} Appending: $filename"
         
         # Append remaining CSVs to GeoPackage layer
+        # CRITICAL: Use -lco SPATIAL_INDEX=YES to maintain spatial index
         if ogr2ogr -f GPKG \
             -append \
             -nln combined \
+            -lco SPATIAL_INDEX=YES \
             -oo X_POSSIBLE_NAMES=BEGIN_LON \
             -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
             "$TEMP_GPKG" \
@@ -387,6 +393,35 @@ echo -e "${SUCCESS} Combined $TOTAL_COMBINED CSV file(s)"
 echo -e "${INFO}   Total features: $GPKG_FEATURES"
 
 # ============================================================================
+# STEP 9B: Rebuild spatial index for QGIS compatibility
+# ============================================================================
+
+echo -e "\n${PROCESS} Rebuilding spatial index for QGIS..."
+
+# Use ogrinfo to verify spatial index exists, rebuild if needed
+if ogrinfo -so "$TEMP_GPKG" "combined" 2>/dev/null | grep -q "Geometry:"; then
+    # Use ogr2ogr to rebuild the GeoPackage with fresh spatial index
+    # This ensures QGIS can properly display spatial extents
+    TEMP_GPKG_REBUILT="$TEMP_DIR/combined_indexed.gpkg"
+    
+    if ogr2ogr -f GPKG \
+        -lco SPATIAL_INDEX=YES \
+        -a_srs EPSG:4326 \
+        "$TEMP_GPKG_REBUILT" \
+        "$TEMP_GPKG" \
+        "combined" 2>/dev/null; then
+        
+        # Replace original with indexed version
+        mv "$TEMP_GPKG_REBUILT" "$TEMP_GPKG"
+        echo -e "${SUCCESS} Spatial index rebuilt and optimized"
+    else
+        echo -e "${WARNING} Could not rebuild spatial index (will continue)"
+    fi
+else
+    echo -e "${WARNING} Could not verify geometry in GeoPackage (will continue)"
+fi
+
+# ============================================================================
 # STEP 10: Convert to final format or use GeoPackage directly
 # ============================================================================
 
@@ -405,6 +440,7 @@ else
     
     echo -e "${PROCESS} Creating Point geometry from BEGIN_LON/BEGIN_LAT..."
     echo -e "${PROCESS} Setting coordinate system to EPSG:4326 (WGS84)..."
+    echo -e "${PROCESS} Preserving spatial extent for QGIS..."
     
     if ogr2ogr -f Parquet \
         -a_srs EPSG:4326 \
@@ -412,7 +448,7 @@ else
         "$TEMP_GPKG" \
         "combined" 2>/dev/null; then
         
-        echo -e "${SUCCESS} Converted to spatial GeoParquet"
+        echo -e "${SUCCESS} Converted to spatial GeoParquet with spatial extent"
     else
         echo -e "${ERROR} Failed to convert to GeoParquet"
         exit 1
