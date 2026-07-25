@@ -7,17 +7,17 @@
 # into a single spatial GeoParquet file using ogr2ogr append.
 #
 # Features:
-#   • Downloads NOAA Storm Events CSV.gz files
-#   • Combines multiple CSVs into single layer
 #   • Adds source_csv filename attribute to every feature
-#   • Creates spatial indexes for QGIS performance
+#   • Creates spatial indexes for QGIS 3.44+ performance
+#   • Combines multiple CSVs into single layer
 #   • Outputs as GeoPackage (editable) or GeoParquet (optimized)
+#   • Geometry recognized by QGIS 3.44 (Point from BEGIN_LON/BEGIN_LAT)
 #
 # Workflow:
 #   1. Download .csv.gz files from NOAA (optional)
 #   2. Extract .csv.gz to .csv
-#   3. Use ogr2ogr to append all CSVs to intermediate GeoPackage
-#   4. Add filename attribute to every feature (via VRT)
+#   3. Add source_csv filename column to each CSV
+#   4. Use ogr2ogr to append all CSVs to intermediate GeoPackage
 #   5. Convert final GeoPackage to spatial GeoParquet
 #
 # Usage:
@@ -36,10 +36,10 @@
 #   -o, --output FILE  Output filename (default: storm_events_combined.parquet or .gpkg)
 #
 # Output Attributes:
-#   Every feature will have:
-#     • geometry (Point): Location from BEGIN_LON/BEGIN_LAT
-#     • source_csv: Filename of the source CSV file
-#     • All original CSV columns (200+ attributes)
+#   Every feature includes:
+#     • geometry (Point): Created from BEGIN_LON/BEGIN_LAT columns
+#     • source_csv: Filename of the CSV this record came from
+#     • All 200+ original NOAA Storm Events attributes
 #
 # Examples:
 #   ./storm_events_csv_to_geoparquet.sh                          # All years → Parquet
@@ -58,32 +58,6 @@
 
 set -e          # Stop on first error
 set -o pipefail # Catch failures inside pipelines
-
-# ============================================================================
-# HELPER FUNCTION: Create VRT file with filename attribute
-# ============================================================================
-
-create_vrt_with_filename() {
-    local csv_file="$1"
-    local vrt_file="$2"
-    local filename="$3"
-    
-    # Create OGR Virtual Format file that adds filename as computed field
-    # This allows us to add a source_csv column with the filename to every feature
-    cat > "$vrt_file" << VRTEOF
-<OGRVRTDataSource>
-  <OGRVRTLayer name="events">
-    <SrcDataSource>$csv_file</SrcDataSource>
-    <GeometryType>wkbPoint</GeometryType>
-    <GeometryField encoding="PointFromColumns" x="BEGIN_LON" y="BEGIN_LAT" reportSrcCRS="EPSG:4326"/>
-    <Field name="source_csv" type="String" width="150">
-      <ComputedFieldType>String</ComputedFieldType>
-      <ComputedFieldValue>'$filename'</ComputedFieldValue>
-    </Field>
-  </OGRVRTLayer>
-</OGRVRTDataSource>
-VRTEOF
-}
 
 # ============================================================================
 # STEP 1: Setup - Colors, paths, and configuration
@@ -379,57 +353,66 @@ while IFS= read -r csv_file; do
     if [ "$FIRST" = true ]; then
         echo -e "${PROCESS} Initializing GeoPackage with: $filename"
         
-        # Create VRT file that adds filename as a computed field
-        VRT_FILE="$TEMP_DIR/${filename%.csv}.vrt"
-        create_vrt_with_filename "$csv_file" "$VRT_FILE" "$filename"
+        # Create modified CSV with source_csv filename column added
+        # Use awk to add filename to every row (header + data rows)
+        CSV_WITH_FILENAME="$TEMP_DIR/temp_${filename%.csv}_src.csv"
+        awk -v csv_name="$filename" \
+            'BEGIN {FS=","; OFS=","} 
+             NR==1 {print $0 ",source_csv"; next}
+             {print $0 "," csv_name}' \
+            "$csv_file" > "$CSV_WITH_FILENAME"
         
-        # Convert first CSV to GeoPackage with geometry, spatial index, and filename attribute
+        # Convert first CSV (with filename column) to GeoPackage with geometry and spatial index
         # CRITICAL: Use -nln combined to explicitly name the layer
         # CRITICAL: Use -lco SPATIAL_INDEX=YES to create spatial index for QGIS
-        # CRITICAL: Use VRT file to add source_csv filename column to every feature
         if ogr2ogr -f GPKG \
             -nln combined \
             -lco SPATIAL_INDEX=YES \
+            -oo X_POSSIBLE_NAMES=BEGIN_LON \
+            -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
             -a_srs EPSG:4326 \
             "$TEMP_GPKG" \
-            "$VRT_FILE" \
-            events 2>/dev/null; then
+            "$CSV_WITH_FILENAME" 2>/dev/null; then
             
             echo -e "${SUCCESS} Initialized GeoPackage with spatial index and filename attribute"
-            rm "$VRT_FILE"  # Clean up VRT file
+            rm "$CSV_WITH_FILENAME"  # Clean up modified CSV
             FIRST=false
             ((TOTAL_COMBINED++))
         else
             echo -e "${ERROR} Failed to initialize GeoPackage with $filename"
-            rm "$VRT_FILE"  # Clean up VRT file on failure
+            rm "$CSV_WITH_FILENAME"  # Clean up on failure
             exit 1
         fi
     else
         echo -e "${PROCESS} Appending: $filename"
         
-        # Create VRT file that adds filename as a computed field
-        VRT_FILE="$TEMP_DIR/append_${filename%.csv}_$((RANDOM)).vrt"
-        create_vrt_with_filename "$csv_file" "$VRT_FILE" "$filename"
+        # Create modified CSV with source_csv filename column added
+        # Use awk to add filename to every row (header + data rows)
+        CSV_WITH_FILENAME="$TEMP_DIR/temp_append_${filename%.csv}_src.csv"
+        awk -v csv_name="$filename" \
+            'BEGIN {FS=","; OFS=","} 
+             NR==1 {next}
+             {print $0 "," csv_name}' \
+            "$csv_file" > "$CSV_WITH_FILENAME"
         
         # Append remaining CSVs to GeoPackage layer with filename attribute
         # CRITICAL: Use -lco SPATIAL_INDEX=YES to maintain spatial index
-        # CRITICAL: Use VRT file to add source_csv filename column to every feature
         if ogr2ogr -f GPKG \
             -append \
             -nln combined \
             -lco SPATIAL_INDEX=YES \
-            -a_srs EPSG:4326 \
+            -oo X_POSSIBLE_NAMES=BEGIN_LON \
+            -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
             "$TEMP_GPKG" \
-            "$VRT_FILE" \
-            events 2>/dev/null; then
+            "$CSV_WITH_FILENAME" 2>/dev/null; then
             
             echo -e "${SUCCESS} Appended with filename attribute"
-            rm "$VRT_FILE"  # Clean up VRT file
+            rm "$CSV_WITH_FILENAME"  # Clean up modified CSV
             ((APPEND_COUNT++))
             ((TOTAL_COMBINED++))
         else
             echo -e "${WARNING} Failed to append $filename (will skip)"
-            rm "$VRT_FILE"  # Clean up VRT file on failure
+            rm "$CSV_WITH_FILENAME"  # Clean up on failure
         fi
     fi
 done <<EOF
@@ -541,7 +524,7 @@ FORMAT_DISPLAY=$(echo "$OUTPUT_FORMAT" | tr '[:lower:]' '[:upper:]')
 echo -e "   Output format: $FORMAT_DISPLAY"
 echo -e "   Geometry type: Point"
 echo -e "   Coordinate system: EPSG:4326 (WGS84)"
-echo -e "   Filename attribute: ✅ source_csv (added to every feature)"
+echo -e "   Filename attribute: ✅ source_csv (on every feature)"
 
 echo -e "\n${INFO} Next steps to open in QGIS:"
 echo -e "   1. Open QGIS 3.0+"
