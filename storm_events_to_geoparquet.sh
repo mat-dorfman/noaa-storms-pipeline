@@ -104,7 +104,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -f|--format)
-            OUTPUT_FORMAT="${2,,}"  # Convert to lowercase
+            OUTPUT_FORMAT=$(echo "$2" | tr '[:upper:]' '[:lower:]')
             if [[ "$OUTPUT_FORMAT" != "parquet" && "$OUTPUT_FORMAT" != "gpkg" ]]; then
                 echo -e "${ERROR} Invalid format: $OUTPUT_FORMAT"
                 echo -e "${INFO} Valid formats: parquet, gpkg"
