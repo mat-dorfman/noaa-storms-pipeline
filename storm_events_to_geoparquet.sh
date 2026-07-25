@@ -159,7 +159,7 @@ echo -e "${SUCCESS} Found $FILE_COUNT file(s) available"
 echo -e "\n${PROCESS} Step 2/5: Filtering by year and checking for duplicates..."
 
 FILTERED_FILES=""
-declare -A YEAR_FILES
+YEAR_FILE_PAIRS=""
 
 for file in $FILES; do
     # Extract year from filename: StormEvents_details-ftp_v1.0_d{YEAR}_c{DATE}.csv.gz
@@ -180,19 +180,16 @@ for file in $FILES; do
         fi
     fi
     
-    # Track files per year for duplicate detection
-    if [ -z "${YEAR_FILES[$YEAR]}" ]; then
-        YEAR_FILES[$YEAR]="$file"
-    else
-        YEAR_FILES[$YEAR]="${YEAR_FILES[$YEAR]}
-$file"
-    fi
+    # Track year:filename pairs (Bash 3.2 compatible, no associative arrays)
+    YEAR_FILE_PAIRS="$YEAR_FILE_PAIRS
+$YEAR:$file"
     
     FILTERED_FILES="$FILTERED_FILES
 $file"
 done
 
 FILTERED_FILES=$(echo "$FILTERED_FILES" | grep -v '^$' || true)
+YEAR_FILE_PAIRS=$(echo "$YEAR_FILE_PAIRS" | grep -v '^$' || true)
 
 if [ -z "$FILTERED_FILES" ]; then
     echo -e "${ERROR} No files match your year filter"
@@ -202,20 +199,34 @@ fi
 FILTERED_COUNT=$(echo "$FILTERED_FILES" | wc -l)
 echo -e "${SUCCESS} Selected $FILTERED_COUNT file(s) to process"
 
-# Warn about duplicates
+# Warn about duplicates (check each year for multiple files)
 DUPLICATE_YEARS=0
-for year in "${!YEAR_FILES[@]}"; do
-    FILE_COUNT_FOR_YEAR=$(echo "${YEAR_FILES[$year]}" | wc -l)
+PROCESSED_YEARS=""
+
+echo "$YEAR_FILE_PAIRS" | while IFS=: read year file; do
+    # Check if we've already processed this year
+    if echo "$PROCESSED_YEARS" | grep -q "^$year$"; then
+        # Already counted, skip
+        continue
+    fi
+    
+    # Count how many files exist for this year
+    FILE_COUNT_FOR_YEAR=$(echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | grep -c "^$year$")
+    
     if [ "$FILE_COUNT_FOR_YEAR" -gt 1 ]; then
         echo -e "\n${WARNING} Multiple versions found for year $year:"
-        echo "${YEAR_FILES[$year]}" | while read f; do
+        echo "$YEAR_FILE_PAIRS" | grep "^$year:" | cut -d: -f2 | while read f; do
             echo "   → $f"
         done
-        ((DUPLICATE_YEARS++))
+        PROCESSED_YEARS="$PROCESSED_YEARS
+$year"
     fi
 done
 
-if [ $DUPLICATE_YEARS -gt 0 ]; then
+# Count total years with duplicates
+DUPLICATE_YEARS=$(echo "$YEAR_FILE_PAIRS" | cut -d: -f1 | sort | uniq -c | awk '$1 > 1 {count++} END {print count}' || echo 0)
+
+if [ "$DUPLICATE_YEARS" -gt 0 ]; then
     echo -e "\n${WARNING} Note: Multiple files exist for $DUPLICATE_YEARS year(s)"
     echo -e "   Each version will be downloaded and processed separately"
 fi
@@ -263,7 +274,7 @@ fi
 echo -e "\n${PROCESS} Step 4/5: Converting to GeoParquet..."
 
 CONVERTED_COUNT=0
-declare -a PARQUET_FILES
+PARQUET_FILES=""
 
 for file in $FILTERED_FILES; do
     CSV_FILE="${file%.gz}"
@@ -281,22 +292,28 @@ for file in $FILTERED_FILES; do
     
     echo -e "${PROCESS} Converting: $CSV_FILE"
     
+#changed possible names to BEGIN_LON and BEGIN_LAT to match the actual column names in the CSV files
+
     if ogr2ogr -f Parquet \
-        -oo X_POSSIBLE_NAMES=LONGITUDE \
-        -oo Y_POSSIBLE_NAMES=LATITUDE \
+        -oo X_POSSIBLE_NAMES=BEGIN_LON \
+        -oo Y_POSSIBLE_NAMES=BEGIN_LAT \
         -a_srs EPSG:4326 \
         "$PARQUET_FILE" \
         "$CSV_PATH" 2>/dev/null; then
         
         echo -e "${SUCCESS} Converted"
-        PARQUET_FILES+=("$PARQUET_FILE")
+        PARQUET_FILES="$PARQUET_FILES
+$PARQUET_FILE"
         ((CONVERTED_COUNT++))
     else
         echo -e "${ERROR} Conversion failed"
     fi
 done
 
-if [ ${#PARQUET_FILES[@]} -eq 0 ]; then
+# Clean up empty lines
+PARQUET_FILES=$(echo "$PARQUET_FILES" | grep -v '^$' || true)
+
+if [ -z "$PARQUET_FILES" ]; then
     echo -e "${ERROR} No files were successfully converted"
     exit 1
 fi
@@ -310,7 +327,9 @@ echo -e "${SUCCESS} Converted $CONVERTED_COUNT file(s)"
 echo -e "\n${PROCESS} Step 5/5: Combining Parquet files..."
 
 FIRST=true
-for pfile in "${PARQUET_FILES[@]}"; do
+while IFS= read -r pfile; do
+    [ -z "$pfile" ] && continue
+    
     if [ "$FIRST" = true ]; then
         echo -e "${PROCESS} Initializing combined file with: $(basename $pfile)"
         if ogr2ogr -f Parquet "$OUTPUT_FILE" "$pfile" 2>/dev/null; then
@@ -325,7 +344,9 @@ for pfile in "${PARQUET_FILES[@]}"; do
             echo -e "${ERROR} Failed to append $(basename $pfile)"
         fi
     fi
-done
+done <<EOF
+$PARQUET_FILES
+EOF
 
 # ============================================================================
 # STEP 10: Generate summary and display results
