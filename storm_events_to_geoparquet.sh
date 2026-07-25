@@ -13,23 +13,27 @@
 #   4. Convert final GeoPackage to spatial GeoParquet
 #
 # Usage:
-#   ./storm_events_csv_to_geoparquet.sh                    # Download all years
+#   ./storm_events_csv_to_geoparquet.sh                    # Download all years → GeoParquet
 #   ./storm_events_csv_to_geoparquet.sh -y 2022            # Download single year
 #   ./storm_events_csv_to_geoparquet.sh -s 2022 -e 2026    # Year range
+#   ./storm_events_csv_to_geoparquet.sh -f gpkg            # Output as GeoPackage
 #   ./storm_events_csv_to_geoparquet.sh -o output.parquet  # Custom output
 #
 # Options:
-#   -h, --help       Show this help message
-#   -y, --year YEAR  Single year to download
-#   -s, --start YEAR Start year (inclusive)
-#   -e, --end YEAR   End year (inclusive)
-#   -o, --output FILE Output filename (default: storm_events_combined.parquet)
+#   -h, --help         Show this help message
+#   -y, --year YEAR    Single year to download
+#   -s, --start YEAR   Start year (inclusive)
+#   -e, --end YEAR     End year (inclusive)
+#   -f, --format FORMAT Output format: parquet (default) or gpkg
+#   -o, --output FILE  Output filename (default: storm_events_combined.parquet or .gpkg)
 #
 # Examples:
-#   ./storm_events_csv_to_geoparquet.sh                          # All years
-#   ./storm_events_csv_to_geoparquet.sh -y 2022                  # Year 2022 only
-#   ./storm_events_csv_to_geoparquet.sh -s 2020 -e 2023          # Years 2020-2023
-#   ./storm_events_csv_to_geoparquet.sh -o storms_2022_26.parquet # Custom output
+#   ./storm_events_csv_to_geoparquet.sh                          # All years → Parquet
+#   ./storm_events_csv_to_geoparquet.sh -f gpkg                  # All years → GeoPackage
+#   ./storm_events_csv_to_geoparquet.sh -y 2022                  # Year 2022 only → Parquet
+#   ./storm_events_csv_to_geoparquet.sh -s 2020 -e 2023 -f gpkg   # Years 2020-2023 → GeoPackage
+#   ./storm_events_csv_to_geoparquet.sh -o storms_2022_26.parquet # Custom Parquet output
+#   ./storm_events_csv_to_geoparquet.sh -o storms.gpkg -f gpkg    # Custom GeoPackage output
 #
 # Requirements:
 #   - ogr2ogr (from GDAL)
@@ -65,7 +69,8 @@ BASE_URL="https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles"
 DATA_DIR="./storm_events_data"
 OUTPUT_DIR="./storm_events_output"
 TEMP_DIR="$OUTPUT_DIR/temp"
-OUTPUT_FILE="$OUTPUT_DIR/storm_events_combined.parquet"
+OUTPUT_FILE=""  # Will be set based on format choice
+OUTPUT_FORMAT="parquet"  # Default format (parquet or gpkg)
 
 # Year filtering (defaults)
 YEAR_START=""
@@ -98,6 +103,15 @@ while [[ $# -gt 0 ]]; do
             YEAR_END="$2"
             shift 2
             ;;
+        -f|--format)
+            OUTPUT_FORMAT="${2,,}"  # Convert to lowercase
+            if [[ "$OUTPUT_FORMAT" != "parquet" && "$OUTPUT_FORMAT" != "gpkg" ]]; then
+                echo -e "${ERROR} Invalid format: $OUTPUT_FORMAT"
+                echo -e "${INFO} Valid formats: parquet, gpkg"
+                exit 1
+            fi
+            shift 2
+            ;;
         -o|--output)
             OUTPUT_FILE="$2"
             shift 2
@@ -109,6 +123,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Set default output filename if not specified
+if [ -z "$OUTPUT_FILE" ]; then
+    if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
+        OUTPUT_FILE="$OUTPUT_DIR/storm_events_combined.gpkg"
+    else
+        OUTPUT_FILE="$OUTPUT_DIR/storm_events_combined.parquet"
+    fi
+fi
 
 # ============================================================================
 # STEP 3: Create working directories
@@ -122,7 +145,13 @@ mkdir -p "$DATA_DIR" "$OUTPUT_DIR" "$TEMP_DIR"
 
 echo -e "${BLUE}"
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║  NOAA Storm Events CSV → Spatial GeoParquet                ║"
+
+if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
+    echo "║  NOAA Storm Events CSV → GeoPackage                       ║"
+else
+    echo "║  NOAA Storm Events CSV → Spatial GeoParquet                ║"
+fi
+
 echo "║  (Using ogr2ogr append)                                    ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -136,6 +165,7 @@ else
     echo -e "${INFO} Filtering: All available years"
 fi
 
+echo -e "${INFO} Output format: $OUTPUT_FORMAT"
 echo ""
 
 # ============================================================================
@@ -357,24 +387,36 @@ echo -e "${SUCCESS} Combined $TOTAL_COMBINED CSV file(s)"
 echo -e "${INFO}   Total features: $GPKG_FEATURES"
 
 # ============================================================================
-# STEP 10: Convert combined GeoPackage to final spatial GeoParquet
+# STEP 10: Convert to final format or use GeoPackage directly
 # ============================================================================
 
-echo -e "\n${PROCESS} Step 6/6: Converting to spatial GeoParquet..."
-
-echo -e "${PROCESS} Creating Point geometry from BEGIN_LON/BEGIN_LAT..."
-echo -e "${PROCESS} Setting coordinate system to EPSG:4326 (WGS84)..."
-
-if ogr2ogr -f Parquet \
-    -a_srs EPSG:4326 \
-    "$OUTPUT_FILE" \
-    "$TEMP_GPKG" \
-    "combined" 2>/dev/null; then
+if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
+    echo -e "\n${PROCESS} Step 6/6: Using GeoPackage as final output..."
     
-    echo -e "${SUCCESS} Converted to spatial GeoParquet"
+    # Copy GeoPackage to output location
+    if cp "$TEMP_GPKG" "$OUTPUT_FILE"; then
+        echo -e "${SUCCESS} GeoPackage ready: $OUTPUT_FILE"
+    else
+        echo -e "${ERROR} Failed to copy GeoPackage to output location"
+        exit 1
+    fi
 else
-    echo -e "${ERROR} Failed to convert to GeoParquet"
-    exit 1
+    echo -e "\n${PROCESS} Step 6/6: Converting to spatial GeoParquet..."
+    
+    echo -e "${PROCESS} Creating Point geometry from BEGIN_LON/BEGIN_LAT..."
+    echo -e "${PROCESS} Setting coordinate system to EPSG:4326 (WGS84)..."
+    
+    if ogr2ogr -f Parquet \
+        -a_srs EPSG:4326 \
+        "$OUTPUT_FILE" \
+        "$TEMP_GPKG" \
+        "combined" 2>/dev/null; then
+        
+        echo -e "${SUCCESS} Converted to spatial GeoParquet"
+    else
+        echo -e "${ERROR} Failed to convert to GeoParquet"
+        exit 1
+    fi
 fi
 
 # ============================================================================
@@ -406,6 +448,7 @@ echo -e "   Input CSV files: $TOTAL_COMBINED"
 echo -e "   Combined features: $FEATURE_COUNT"
 echo -e "   Output file: $OUTPUT_FILE"
 echo -e "   Output size: $SIZE"
+echo -e "   Output format: ${OUTPUT_FORMAT^^}"
 echo -e "   Geometry type: Point"
 echo -e "   Coordinate system: EPSG:4326 (WGS84)"
 
@@ -415,11 +458,20 @@ echo -e "   2. Layer → Add Layer → Add Vector Layer"
 echo -e "   3. Select: $OUTPUT_FILE"
 echo -e "   4. Storm events will display as points on the map"
 
-echo -e "\n${INFO} File is ready for:"
-echo -e "   • QGIS analysis and visualization"
-echo -e "   • ArcGIS Pro"
-echo -e "   • PostGIS database import"
-echo -e "   • Any GIS software supporting GeoParquet"
+if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
+    echo -e "\n${INFO} File is ready for:"
+    echo -e "   • QGIS analysis and visualization"
+    echo -e "   • ArcGIS Pro"
+    echo -e "   • PostGIS database import"
+    echo -e "   • SpatiaLite queries"
+    echo -e "   • Any GIS software supporting GeoPackage"
+else
+    echo -e "\n${INFO} File is ready for:"
+    echo -e "   • QGIS analysis and visualization"
+    echo -e "   • ArcGIS Pro"
+    echo -e "   • PostGIS database import"
+    echo -e "   • Any GIS software supporting GeoParquet"
+fi
 
 # ============================================================================
 # STEP 12: Cleanup
