@@ -8,10 +8,10 @@
 #
 # Features:
 #   • Adds source_csv filename attribute to every feature
-#   • Creates spatial indexes for QGIS 3.44+ performance
+#   • Creates spatial indexes for QGIS compatibility
 #   • Combines multiple CSVs into single layer
 #   • Outputs as GeoPackage (editable) or GeoParquet (optimized)
-#   • Geometry recognized by QGIS 3.44 (Point from BEGIN_LON/BEGIN_LAT)
+#   • Geometry recognized (Point from BEGIN_LON/BEGIN_LAT)
 #
 # Workflow:
 #   1. Download .csv.gz files from NOAA (optional)
@@ -21,11 +21,11 @@
 #   5. Convert final GeoPackage to spatial GeoParquet
 #
 # Usage:
-#   ./storm_events_csv_to_geoparquet.sh                    # Download all years → GeoParquet
-#   ./storm_events_csv_to_geoparquet.sh -y 2022            # Download single year
-#   ./storm_events_csv_to_geoparquet.sh -s 2022 -e 2026    # Year range
-#   ./storm_events_csv_to_geoparquet.sh -f gpkg            # Output as GeoPackage
-#   ./storm_events_csv_to_geoparquet.sh -o output.parquet  # Custom output
+#   ./storm_events_to_geoparquet.sh                    # Download all years → GeoParquet
+#   ./storm_events_to_geoparquet.sh -y 2022            # Download single year
+#   ./storm_events_to_geoparquet.sh -s 2022 -e 2026    # Year range
+#   ./storm_events_to_geoparquet.sh -f gpkg            # Output as GeoPackage
+#   ./storm_events_to_geoparquet.sh -o output.parquet  # Custom output
 #
 # Options:
 #   -h, --help         Show this help message
@@ -36,18 +36,18 @@
 #   -o, --output FILE  Output filename (default: storm_events_combined.parquet or .gpkg)
 #
 # Output Attributes:
-#   Every feature includes:
+#   When applicable, every feature includes:
 #     • geometry (Point): Created from BEGIN_LON/BEGIN_LAT columns
 #     • source_csv: Filename of the CSV this record came from
 #     • All 200+ original NOAA Storm Events attributes
 #
 # Examples:
-#   ./storm_events_csv_to_geoparquet.sh                          # All years → Parquet
-#   ./storm_events_csv_to_geoparquet.sh -f gpkg                  # All years → GeoPackage
-#   ./storm_events_csv_to_geoparquet.sh -y 2022                  # Year 2022 only → Parquet
-#   ./storm_events_csv_to_geoparquet.sh -s 2020 -e 2023 -f gpkg   # Years 2020-2023 → GeoPackage
-#   ./storm_events_csv_to_geoparquet.sh -o storms_2022_26.parquet # Custom Parquet output
-#   ./storm_events_csv_to_geoparquet.sh -o storms.gpkg -f gpkg    # Custom GeoPackage output
+#   ./storm_events_to_geoparquet.sh                          # All years → Parquet
+#   ./storm_events_to_geoparquet.sh -f gpkg                  # All years → GeoPackage
+#   ./storm_events_to_geoparquet.sh -y 2022                  # Year 2022 only → Parquet
+#   ./storm_events_to_geoparquet.sh -s 2020 -e 2023 -f gpkg   # Years 2020-2023 → GeoPackage
+#   ./storm_events_to_geoparquet.sh -o storms_2022_26.parquet # Custom Parquet output
+#   ./storm_events_to_geoparquet.sh -o storms.gpkg -f gpkg    # Custom GeoPackage output
 #
 # Requirements:
 #   - ogr2ogr (from GDAL)
@@ -542,31 +542,8 @@ FORMAT_DISPLAY=$(echo "$OUTPUT_FORMAT" | tr '[:lower:]' '[:upper:]')
 echo "   Output format: $FORMAT_DISPLAY"
 echo "   Geometry type: Point"
 echo "   Coordinate system: EPSG:4326 (WGS84)"
-echo "   Filename attribute: source_csv (on every feature)"
+echo "   Filename attribute: source_csv"
 
-echo ""
-echo "Next steps to open in QGIS:"
-echo "   1. Open QGIS 3.0+"
-echo "   2. Layer → Add Layer → Add Vector Layer"
-echo "   3. Select: $OUTPUT_FILE"
-echo "   4. Storm events will display as points on the map"
-
-if [ "$OUTPUT_FORMAT" = "gpkg" ]; then
-    echo ""
-    echo "File is ready for:"
-    echo "   • QGIS analysis and visualization"
-    echo "   • ArcGIS Pro"
-    echo "   • PostGIS database import"
-    echo "   • SpatiaLite queries"
-    echo "   • Any GIS software supporting GeoPackage"
-else
-    echo ""
-    echo "File is ready for:"
-    echo "   • QGIS analysis and visualization"
-    echo "   • ArcGIS Pro"
-    echo "   • PostGIS database import"
-    echo "   • Any GIS software supporting GeoParquet"
-fi
 
 # ============================================================================
 # STEP 12: Cleanup
