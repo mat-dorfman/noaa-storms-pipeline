@@ -57,6 +57,7 @@
 ################################################################################
 
 set -e          # Stop on first error
+set -u          # Stop on uninitialize variable error
 set -o pipefail # Catch failures inside pipelines
 
 # ============================================================================
